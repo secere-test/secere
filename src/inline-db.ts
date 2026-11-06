@@ -3,8 +3,22 @@
 import { Factory } from 'wa-sqlite';
 import type { Stmt } from './core/persistence-store';
 
+export interface WrappedDriver {
+  init(): Promise<void>;
+  exec(sql: string): Promise<void>;
+  prepare(sql: string): Stmt;
+}
+
+interface WrappedPrepared {
+  step(): boolean;
+  getRowsChanged(): number;
+  getAsObject(): unknown;
+  bind(params: unknown[]): unknown;
+}
+
 let wasmReady: any = null;
 let db: any = null;
+let sqlite: any = null;
 
 async function getWasm(): Promise<any> {
   if (!wasmReady) {
@@ -15,16 +29,15 @@ async function getWasm(): Promise<any> {
   return wasmReady;
 }
 
-export interface StmtBound {
-  run(): Promise<{ changes: number }>;
-  all<T>(): Promise<{ results: T[] }>;
-}
-
-function makeBound(s: any): StmtBound {
-  return {
-    run: async () => {
-      s.step();
-      return { changes: s.getRowsChanged() };
+function makeBound(s: WrappedPrepared): Stmt {
+  let bound: Stmt['bind'] | undefined;
+  const api: Stmt = {
+    bind: (...values: unknown[]) => {
+      s.bind(values);
+      if (!bound) {
+        bound = (...more: unknown[]) => api.bind(...values, ...more) as any;
+      }
+      return api as any;
     },
     all: async <T>(): Promise<{ results: T[] }> => {
       const rows: T[] = [];
@@ -32,12 +45,14 @@ function makeBound(s: any): StmtBound {
       return { results: rows };
     },
   };
+  return api;
 }
 
-export const inlineDriver = {
+export const inlineDriver: WrappedDriver = {
   async init(): Promise<void> {
     if (!db) {
-      const sqlite = await getWasm();
+      const factory = await getWasm();
+      sqlite = factory;
       db = await sqlite.open_v2(':memory:');
       sqlite.executeBatch(db, [
         `create table if not exists secere_tree(key text primary key, data text);`,
@@ -45,21 +60,16 @@ export const inlineDriver = {
       ]);
     }
   },
-  prepare(sql: string): Stmt {
-    if (!db) throw new Error('inlineDriver not initialised');
-    const sqlite = db.constructor.prototype.constructor as any;
-    const sqlPtr = sqlite.str_new(db, sql);
-    const prepared = sqlite.prepare_v2(db, sqlPtr) as any;
-    sqlite.str_finish(sqlPtr);
-    if (!prepared) throw new Error('inlineDriver prepare_v2 returned null');
-    const rawBind = prepared.bind.bind(prepared);
-    const bound: Stmt['bind'] = ((...values: unknown[]) => rawBind(values)) as any;
-    const all: Stmt['all'] = makeBound(prepared).all;
-    return { bind: bound, all };
-  },
   async exec(sql: string): Promise<void> {
     await this.init();
-    const sqlite = db.constructor.prototype.constructor as any;
     await sqlite.executeBatch(db, [sql]);
+  },
+  prepare(sql: string): Stmt {
+    if (!db) throw new Error('inlineDriver not initialised');
+    const sqlPtr = sqlite.str_new(db, sql);
+    const prepared = sqlite.prepare_v2(db, sqlPtr) as WrappedPrepared | null;
+    sqlite.str_finish(sqlPtr);
+    if (!prepared) throw new Error('inlineDriver prepare_v2 returned null');
+    return makeBound(prepared);
   },
 };

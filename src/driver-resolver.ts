@@ -17,9 +17,18 @@
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- bundler target placeholder
 declare const __TARGET__: 'tauri' | 'android' | 'web';
-// ^^^ bundler target placeholder, set per target at build time, not emitted at runtime
+// ^^^ untyped bundler target placeholder, set per target at build time, not emitted at runtime
 
 import type { Driver } from './core/persistence-store';
+
+// Re-export the per-target driver module so desktop/Android entry points can
+// import the concrete driver directly when they prefer, instead of going through
+// async resolution.
+
+export { tauriDriver } from './desktop/sqlite-driver';
+export { capacitorDriver } from './android/sqlite-driver';
+export { inlineDriver } from './inline-db';
+
 
 async function resolveWebDriver(): Promise<Driver> {
   const m = await import('./inline-db');
@@ -42,5 +51,4 @@ export async function resolveDriver(): Promise<Driver> {
   if (__TARGET__ === 'tauri') return resolveDesktopDriver();
   // __TARGET__ === 'android'
   return resolveAndroidDriver();
-
 }
