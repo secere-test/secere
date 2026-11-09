@@ -18,8 +18,21 @@ export function saveState(tree: TreeData, blobs: MediaBlobStore): void {
 }
 
 export interface Driver {
+  /**
+   * Optional boot hook: open (or create) the underlying database and verify it
+   * answers. The resolver calls it once before the UI reads the repo, so a
+   * missing or broken backend surfaces as a rejected promise instead of a
+   * failed first query.
+   */
+  init?(): Promise<void>;
   exec(sql: string): Promise<void>;
-  prepare(sql: string): Stmt;
+  /**
+   * Compiling a statement is asynchronous on every backend that matters
+   * (wa-sqlite's async build, and the Android plugin's bridge round-trip), so
+   * the interface is async here rather than forcing a sync shim that cannot
+   * work for native SQLite.
+   */
+  prepare(sql: string): Promise<Stmt>;
 }
 
 export interface Stmt {
@@ -93,8 +106,9 @@ export function createTestRepo(driver: Driver): SecereRepo {
 
 // Boot path: the app entry calls replaceRepoDriver(driver) so this
 // singleton can be swapped for the resolved per-target driver before the UI
-// first reads it. Today the browser build bootstraps the wa-sqlite in-memory
-// driver here; desktop and Android wire their plugins at their own boot points.
+// first reads it. The browser build bootstraps the wa-sqlite driver
+// (IndexedDB-backed), the Android build the native plugin driver, and desktop
+// wires its own plugin at its boot point.
 // Media bytes are stored as a BLOB keyed by SHA-256; the tree is a single JSON
 // row; the schema is create table if not exists on first access.
 class SqliteRepo implements SecereRepo {
@@ -105,15 +119,12 @@ class SqliteRepo implements SecereRepo {
       `create table if not exists secere_tree(key text primary key, data text);
        create table if not exists secere_media(sha256 text primary key, mime text, bytes blob);`,
     );
-    const t = await this.db
-      .prepare("select data from secere_tree where key = ?")
-      .bind('tree')
-      .all<{ data: string }>();
+    const treeStmt = await this.db.prepare('select data from secere_tree where key = ?');
+    const t = await treeStmt.bind('tree').all<{ data: string }>();
     const tree = t.results.length ? JSON.parse(t.results[0].data) : emptyTree('Secere');
 
-    const m = await this.db
-      .prepare('select * from secere_media')
-      .all<{ sha256: string; mime: string; bytes: Uint8Array }>();
+    const mediaStmt = await this.db.prepare('select * from secere_media');
+    const m = await mediaStmt.all<{ sha256: string; mime: string; bytes: Uint8Array }>();
     const blobs = new Map<string, { bytes: Uint8Array; mime: string }>();
     for (const r of m.results) {
       blobs.set(r.sha256, { bytes: r.bytes, mime: r.mime });
@@ -123,15 +134,11 @@ class SqliteRepo implements SecereRepo {
 
   async save(tree: TreeData, blobs: MediaBlobStore): Promise<void> {
     await this.db.exec('delete from secere_media;');
-    await this.db
-      .prepare("insert or replace into secere_tree(key,data) values(?,?)")
-      .bind('tree', JSON.stringify(tree))
-      .run();
+    const treeStmt = await this.db.prepare('insert or replace into secere_tree(key,data) values(?,?)');
+    await treeStmt.bind('tree', JSON.stringify(tree)).run();
+    const mediaStmt = await this.db.prepare('insert into secere_media(sha256,mime,bytes) values(?,?,?)');
     for (const [sha, b] of blobs.entries()) {
-      await this.db
-        .prepare('insert into secere_media(sha256,mime,bytes) values(?,?,?)')
-        .bind(sha, b.mime, b.bytes)
-        .run();
+      await mediaStmt.bind(sha, b.mime, b.bytes).run();
     }
   }
 }
@@ -166,7 +173,7 @@ class MockDriver {
     }
   }
 
-  prepare(sql: string): Stmt {
+  async prepare(sql: string): Promise<Stmt> {
     return new MockStmt(this, sql);
   }
 }

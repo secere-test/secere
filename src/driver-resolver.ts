@@ -21,13 +21,9 @@ declare const __TARGET__: 'tauri' | 'android' | 'web';
 
 import type { Driver } from './core/persistence-store';
 
-// Re-export the per-target driver module so desktop/Android entry points can
-// import the concrete driver directly when they prefer, instead of going through
-// async resolution.
-
-export { tauriDriver } from './desktop/sqlite-driver';
-export { capacitorDriver } from './android/sqlite-driver';
-export { inlineDriver } from './inline-db';
+// Every driver is reached through a dynamic import below, on purpose: a static
+// re-export here would keep all three drivers (and their plugin dependencies)
+// in every target's bundle, whatever `__TARGET__` says.
 
 
 async function resolveWebDriver(): Promise<Driver> {
@@ -43,7 +39,22 @@ async function resolveDesktopDriver(): Promise<Driver> {
 
 async function resolveAndroidDriver(): Promise<Driver> {
   const m = await import('./android/sqlite-driver');
-  return m.capacitorDriver;
+  try {
+    // Probe the native plugin through its boot hook: this opens the real
+    // SQLite file on the device and proves the plugin is registered.
+    await m.capacitorDriver.init?.();
+    return m.capacitorDriver;
+  } catch (error) {
+    // No `SecereSqlite` plugin in this shell — a browser preview of the Android
+    // build, or a broken plugin registration. Keep the app usable on the WASM
+    // driver instead of white-screening, but say so loudly: data then lives in
+    // WebView IndexedDB, not in the app's SQLite file.
+    console.warn(
+      '[secere] native SQLite plugin unavailable; falling back to the WASM driver',
+      error,
+    );
+    return resolveWebDriver();
+  }
 }
 
 export async function resolveDriver(): Promise<Driver> {
